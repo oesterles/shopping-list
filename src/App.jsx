@@ -112,7 +112,7 @@ export default function ShoppingListApp() {
     } catch (err) {
       console.error(err);
       setPhase("error");
-      setMessage("Something went wrong. Tap to try again.");
+      setMessage("Error: " + (err.message || err.toString()).slice(0, 80));
       setTimeout(() => { setPhase("idle"); setMessage(""); setTranscript(""); }, 3000);
     }
   }, []);
