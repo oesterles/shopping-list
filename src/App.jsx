@@ -1,27 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyiX6DVqhYT5qm4krjH4OpK7xqthe7PePCPgbMH-HARnXlbh9SsGCS0mGVhUGrep6CuUQ/exec";
-
-const SYSTEM_PROMPT = `You are a shopping list assistant. The user will speak commands to manage their shopping list.
-
-You must respond ONLY with a valid JSON object — no markdown, no explanation, no extra text.
-
-Respond with one of these JSON shapes:
-
-Add items:
-{"action": "add", "items": ["item1", "item2"]}
-
-Read list:
-{"action": "read"}
-
-Unknown:
-{"action": "unknown", "message": "friendly short response"}
-
-Rules:
-- Capitalize each item properly
-- Remove duplicates
-- Strip quantities from item names (just the item name)
-- If the user says "add X and Y" or "I need X, Y, Z" extract all items`;
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbziNJjG_v2WvTtRNC_X9LIqrQ51An4zTUwlmBUSEN4ZadgUjSJxJOqnSU-YENxnbNC69g/exec";
 
 export default function ShoppingListApp() {
   const [phase, setPhase] = useState("idle");
@@ -37,44 +16,18 @@ export default function ShoppingListApp() {
     window.speechSynthesis.speak(u);
   };
 
-  const callClaude = async (text) => {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 500,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: text }],
-      }),
-    });
-    const data = await res.json();
-    const raw = data.content?.find((b) => b.type === "text")?.text || "{}";
-    return JSON.parse(raw.replace(/```json|```/g, "").trim());
-  };
-
-  const callSheet = async (payload) => {
-    const res = await fetch(SCRIPT_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify(payload),
-    });
-    return { success: true };
-  };
-
-  const readSheet = async () => {
-    const res = await fetch(SCRIPT_URL + "?action=read");
-    return res.json();
-  };
-
   const processText = useCallback(async (text) => {
     setTranscript(text);
     setPhase("thinking");
     setMessage("Got it, processing...");
 
     try {
-      const intent = await callClaude(text);
+      // Step 1: Parse intent via Apps Script (no API key needed)
+      const parseRes = await fetch(SCRIPT_URL, {
+        method: "POST",
+        body: JSON.stringify({ action: "parse", text }),
+      });
+      const intent = await parseRes.json();
 
       if (intent.action === "add") {
         const items = intent.items || [];
@@ -85,7 +38,15 @@ export default function ShoppingListApp() {
           return;
         }
         setMessage(`Adding ${items.join(", ")}...`);
-        await callSheet({ action: "add", items });
+
+        // Step 2: Add to sheet
+        const addRes = await fetch(SCRIPT_URL, {
+          method: "POST",
+          body: JSON.stringify({ action: "add", items }),
+        });
+        const result = await addRes.json();
+        if (!result.success) throw new Error(result.message);
+
         setPhase("success");
         setMessage(`✓ Added: ${items.join(", ")}`);
         speak(`Added ${items.join(" and ")} to your list.`);
@@ -93,7 +54,8 @@ export default function ShoppingListApp() {
 
       } else if (intent.action === "read") {
         setMessage("Reading your list...");
-        const result = await readSheet();
+        const readRes = await fetch(SCRIPT_URL + "?action=read");
+        const result = await readRes.json();
         const items = result.items || [];
         setListItems(items);
         setShowList(true);
@@ -113,7 +75,7 @@ export default function ShoppingListApp() {
       console.error(err);
       setPhase("error");
       setMessage("Error: " + (err.message || err.toString()).slice(0, 80));
-      setTimeout(() => { setPhase("idle"); setMessage(""); setTranscript(""); }, 3000);
+      setTimeout(() => { setPhase("idle"); setMessage(""); setTranscript(""); }, 4000);
     }
   }, []);
 
@@ -154,26 +116,17 @@ export default function ShoppingListApp() {
     };
 
     r.onerror = (e) => {
-      console.error("SR error", e.error);
       setPhase("error");
-      if (e.error === "no-speech") {
-        setMessage("No speech detected. Tap and try again.");
-      } else if (e.error === "not-allowed") {
-        setMessage("Microphone blocked. Check Chrome site permissions.");
-      } else {
-        setMessage(`Error: ${e.error}. Tap to try again.`);
-      }
+      if (e.error === "no-speech") setMessage("No speech detected. Tap and try again.");
+      else if (e.error === "not-allowed") setMessage("Microphone blocked. Check Chrome permissions.");
+      else setMessage(`Error: ${e.error}. Tap to try again.`);
       setTimeout(() => { setPhase("idle"); setMessage(""); }, 3500);
     };
 
-    r.onend = () => {
-      if (phase === "recording") setPhase("idle");
-    };
+    r.onend = () => { if (phase === "recording") setPhase("idle"); };
 
     recognitionRef.current = r;
-    try {
-      r.start();
-    } catch (e) {
+    try { r.start(); } catch (e) {
       setPhase("error");
       setMessage("Couldn't start mic. Tap to try again.");
       setTimeout(() => { setPhase("idle"); setMessage(""); }, 3000);
