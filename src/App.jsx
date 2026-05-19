@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 
 const SHEET_NAME = "Notes and list";
 const TAB_NAME = "List";
@@ -7,244 +7,209 @@ const SYSTEM_PROMPT = `You are a shopping list assistant. The user will speak co
 
 You must respond ONLY with a valid JSON object — no markdown, no explanation, no extra text.
 
-Detect the intent and extract items from the user's spoken input.
-
 Respond with one of these JSON shapes:
 
 Add items:
 {"action": "add", "items": ["item1", "item2"]}
 
-Read list (user says "read my list", "what's on my list", "show my list", etc.):
+Read list:
 {"action": "read"}
 
-Clear list:
-{"action": "clear"}
-
-Unknown / chitchat:
+Unknown:
 {"action": "unknown", "message": "friendly short response"}
 
 Rules:
 - Capitalize each item properly
 - Remove duplicates
-- Strip quantities/amounts from item names (just the item)
-- If the user says "add X and Y" or "I need X, Y, Z" — extract all items`;
+- Strip quantities from item names
+- If the user says "add X and Y" or "I need X, Y, Z" extract all items`;
 
 export default function ShoppingListApp() {
-  const [status, setStatus] = useState("idle");
+  const [phase, setPhase] = useState("idle"); // idle | recording | thinking | success | error
   const [transcript, setTranscript] = useState("");
   const [message, setMessage] = useState("");
   const [listItems, setListItems] = useState([]);
   const [showList, setShowList] = useState(false);
-  const [pulseRings, setPulseRings] = useState(false);
   const recognitionRef = useRef(null);
-  const timeoutRef = useRef(null);
 
   const speak = (text) => {
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    window.speechSynthesis.speak(utterance);
+    const u = new SpeechSynthesisUtterance(text);
+    window.speechSynthesis.speak(u);
   };
 
   const callClaude = async (text) => {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
+        max_tokens: 500,
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: text }],
       }),
     });
-    const data = await response.json();
+    const data = await res.json();
     const raw = data.content?.find((b) => b.type === "text")?.text || "{}";
     return JSON.parse(raw.replace(/```json|```/g, "").trim());
   };
 
-  const callClaudeWithDrive = async (conversationHistory) => {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const callClaudeWithDrive = async (userContent) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 1000,
-        system: `You are a Google Drive assistant. The user wants to manage a Google Sheet called "${SHEET_NAME}", tab "${TAB_NAME}", column A.
-
-When asked to add items, use the Google Drive MCP tools to:
-1. First find the spreadsheet file named "${SHEET_NAME}"
-2. Append new rows to column A of the "${TAB_NAME}" sheet, after any existing items
-
-When asked to read the list, retrieve all non-empty values from column A of the "${TAB_NAME}" sheet.
-
-Be efficient and direct. After completing the task, summarize what you did in plain language.`,
-        messages: conversationHistory,
-        mcp_servers: [
-          {
-            type: "url",
-            url: "https://drivemcp.googleapis.com/mcp/v1",
-            name: "google-drive-mcp",
-          },
-        ],
+        system: `You manage a Google Sheet called "${SHEET_NAME}", tab "${TAB_NAME}", column A. Use the Google Drive MCP tools to complete the task. Be efficient.`,
+        messages: [{ role: "user", content: userContent }],
+        mcp_servers: [{
+          type: "url",
+          url: "https://drivemcp.googleapis.com/mcp/v1",
+          name: "google-drive-mcp",
+        }],
       }),
     });
-    return response.json();
+    return res.json();
   };
 
-  const handleVoiceResult = useCallback(async (text) => {
+  const processText = useCallback(async (text) => {
     setTranscript(text);
-    setStatus("thinking");
-    setMessage("Figuring out what you need...");
+    setPhase("thinking");
+    setMessage("Got it, processing...");
 
     try {
       const intent = await callClaude(text);
 
       if (intent.action === "add") {
         const items = intent.items || [];
-        if (items.length === 0) {
-          setStatus("error");
-          setMessage("I couldn't find any items to add. Try again!");
-          speak("I couldn't find any items to add.");
-          setTimeout(() => { setStatus("idle"); setMessage(""); setTranscript(""); }, 3000);
+        if (!items.length) {
+          setPhase("error");
+          setMessage("Couldn't find items to add. Try again.");
+          setTimeout(() => { setPhase("idle"); setMessage(""); setTranscript(""); }, 3000);
           return;
         }
-
         setMessage(`Adding ${items.join(", ")}...`);
-
-        const history = [{
-          role: "user",
-          content: `Add these items to column A of the "${TAB_NAME}" tab in the Google Sheet named "${SHEET_NAME}": ${items.join(", ")}. Append them after any existing items.`,
-        }];
-
-        await callClaudeWithDrive(history);
-
-        setStatus("success");
+        await callClaudeWithDrive(
+          `Append these items to column A of the "${TAB_NAME}" tab in "${SHEET_NAME}", after any existing data: ${items.join(", ")}`
+        );
+        setPhase("success");
         setMessage(`✓ Added: ${items.join(", ")}`);
-        speak(`Added ${items.join(" and ")} to your shopping list.`);
-
-        setTimeout(() => { setStatus("idle"); setMessage(""); setTranscript(""); }, 3500);
+        speak(`Added ${items.join(" and ")} to your list.`);
+        setTimeout(() => { setPhase("idle"); setMessage(""); setTranscript(""); }, 3500);
 
       } else if (intent.action === "read") {
-        setMessage("Reading your shopping list...");
-
-        const history = [{
-          role: "user",
-          content: `Read all non-empty values from column A of the "${TAB_NAME}" tab in the Google Sheet named "${SHEET_NAME}". Return them as a simple list.`,
-        }];
-
-        const driveResponse = await callClaudeWithDrive(history);
-        const textBlock = driveResponse.content?.find((b) => b.type === "text");
-        const responseText = textBlock?.text || "";
-
-        const lines = responseText
+        setMessage("Reading your list...");
+        const resp = await callClaudeWithDrive(
+          `Read all non-empty values from column A of the "${TAB_NAME}" tab in "${SHEET_NAME}". List them plainly.`
+        );
+        const textBlock = resp.content?.find((b) => b.type === "text");
+        const lines = (textBlock?.text || "")
           .split("\n")
           .map((l) => l.replace(/^[-•*\d.)\s]+/, "").trim())
-          .filter((l) => l.length > 1 && !l.toLowerCase().includes("column") && !l.toLowerCase().includes("sheet") && !l.toLowerCase().includes("tab"));
-
+          .filter((l) => l.length > 1 && !/column|sheet|tab/i.test(l));
         setListItems(lines);
         setShowList(true);
-        setStatus("success");
-        setMessage(`Your list has ${lines.length} item(s)`);
-
-        if (lines.length > 0) {
-          speak(`You have ${lines.length} items on your list: ${lines.slice(0, 5).join(", ")}${lines.length > 5 ? ", and more." : "."}`);
-        } else {
-          speak("Your shopping list is empty.");
-        }
-
-        setTimeout(() => { setStatus("idle"); setTranscript(""); }, 2000);
+        setPhase("success");
+        setMessage(`${lines.length} item(s) on your list`);
+        speak(lines.length
+          ? `You have ${lines.length} items: ${lines.slice(0, 5).join(", ")}${lines.length > 5 ? ", and more" : ""}.`
+          : "Your list is empty.");
+        setTimeout(() => { setPhase("idle"); setTranscript(""); }, 2000);
 
       } else {
-        setStatus("idle");
-        setMessage(intent.message || "Try saying 'add milk and eggs' or 'read my list'.");
+        setPhase("idle");
+        setMessage(intent.message || "Try: 'Add milk and eggs' or 'Read my list'");
         setTimeout(() => setMessage(""), 4000);
       }
     } catch (err) {
       console.error(err);
-      setStatus("error");
-      setMessage("Something went wrong. Please try again.");
-      speak("Something went wrong. Please try again.");
-      setTimeout(() => { setStatus("idle"); setMessage(""); setTranscript(""); }, 3000);
+      setPhase("error");
+      setMessage("Something went wrong. Tap to try again.");
+      setTimeout(() => { setPhase("idle"); setMessage(""); setTranscript(""); }, 3000);
     }
   }, []);
 
-  const startListening = useCallback(() => {
-    if (status === "listening") {
+  const handleMicPress = useCallback(() => {
+    if (phase === "thinking") return;
+
+    // Stop if already recording
+    if (phase === "recording") {
       recognitionRef.current?.stop();
-      return;
-    }
-    if (status === "thinking") return;
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setMessage("Speech recognition not supported. Use Chrome on Android.");
+      setPhase("idle");
+      setMessage("");
       return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = "en-US";
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setMessage("Use Chrome on Android for voice support.");
+      return;
+    }
 
-    recognition.onstart = () => {
-      setStatus("listening");
+    const r = new SR();
+    r.lang = "en-US";
+    r.continuous = false;
+    r.interimResults = false;
+    r.maxAlternatives = 1;
+
+    r.onstart = () => {
+      setPhase("recording");
       setMessage("Listening... speak now");
-      setPulseRings(true);
       setShowList(false);
+      setTranscript("");
     };
 
-    recognition.onresult = (e) => {
+    r.onspeechend = () => {
+      r.stop();
+    };
+
+    r.onresult = (e) => {
       const text = e.results[0][0].transcript;
-      setPulseRings(false);
-      handleVoiceResult(text);
+      processText(text);
     };
 
-    recognition.onerror = (e) => {
-      setPulseRings(false);
-      setStatus("error");
-      setMessage(`Mic error: ${e.error}. Tap to try again.`);
-      setTimeout(() => { setStatus("idle"); setMessage(""); }, 3000);
+    r.onerror = (e) => {
+      console.error("SR error", e.error);
+      setPhase("error");
+      if (e.error === "no-speech") {
+        setMessage("No speech detected. Tap and try again.");
+      } else if (e.error === "not-allowed") {
+        setMessage("Microphone blocked. Check Chrome site permissions.");
+      } else {
+        setMessage(`Error: ${e.error}. Tap to try again.`);
+      }
+      setTimeout(() => { setPhase("idle"); setMessage(""); }, 3500);
     };
 
-    recognition.onend = () => {
-      setPulseRings(false);
+    r.onend = () => {
+      if (phase === "recording") setPhase("idle");
     };
 
-    recognitionRef.current = recognition;
-    recognition.start();
-  }, [status, handleVoiceResult]);
-
-  // Auto-start mic if ?listen=1 is in the URL (used by Google Assistant routine)
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("listen") === "1") {
-      const timer = setTimeout(() => startListening(), 900);
-      return () => clearTimeout(timer);
+    recognitionRef.current = r;
+    try {
+      r.start();
+    } catch (e) {
+      setPhase("error");
+      setMessage("Couldn't start mic. Tap to try again.");
+      setTimeout(() => { setPhase("idle"); setMessage(""); }, 3000);
     }
-  }, [startListening]);
+  }, [phase, processText]);
 
-  useEffect(() => {
-    return () => {
-      recognitionRef.current?.stop();
-      clearTimeout(timeoutRef.current);
-    };
-  }, []);
-
-  const btnColor = {
-    idle: "#16a34a", listening: "#ef4444",
+  const colors = {
+    idle: "#16a34a", recording: "#ef4444",
     thinking: "#f59e0b", success: "#22c55e", error: "#dc2626"
-  }[status];
-
-  const btnIcon = {
-    idle: "🎙", listening: "⏹", thinking: "⋯", success: "✓", error: "✕"
-  }[status];
+  };
+  const icons = {
+    idle: "🎙", recording: "⏹", thinking: "⋯", success: "✓", error: "!"
+  };
+  const btnColor = colors[phase];
 
   return (
     <div style={{
       minHeight: "100vh",
-      background: "linear-gradient(135deg, #0f2010 0%, #1a3a1a 40%, #0d1f0d 100%)",
-      fontFamily: "'Georgia', 'Times New Roman', serif",
+      background: "linear-gradient(135deg, #0f2010 0%, #1a3a1a 50%, #0d1f0d 100%)",
+      fontFamily: "Georgia, serif",
       display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center",
       padding: "24px", position: "relative", overflow: "hidden",
@@ -255,113 +220,116 @@ Be efficient and direct. After completing the task, summarize what you did in pl
         pointerEvents: "none",
       }} />
 
-      <div style={{ textAlign: "center", marginBottom: "40px", position: "relative" }}>
+      {/* Header */}
+      <div style={{ textAlign: "center", marginBottom: "48px" }}>
         <div style={{ fontSize: "11px", letterSpacing: "4px", color: "#4ade80", textTransform: "uppercase", marginBottom: "8px", opacity: 0.8 }}>
           Voice Assistant
         </div>
-        <h1 style={{ fontSize: "clamp(28px, 6vw, 42px)", color: "#f0fdf4", margin: 0, fontWeight: "normal", letterSpacing: "-0.5px" }}>
+        <h1 style={{ fontSize: "clamp(28px, 7vw, 44px)", color: "#f0fdf4", margin: 0, fontWeight: "normal" }}>
           Shopping List
         </h1>
         <div style={{ width: "40px", height: "2px", background: "#22c55e", margin: "12px auto 0", borderRadius: "2px" }} />
       </div>
 
-      <div style={{ position: "relative", marginBottom: "32px" }}>
-        {pulseRings && [0, 1, 2].map((i) => (
+      {/* Big tap button */}
+      <div style={{ position: "relative", marginBottom: "40px" }}>
+        {phase === "recording" && [0, 1, 2].map((i) => (
           <div key={i} style={{
-            position: "absolute", inset: `-${(i + 1) * 16}px`,
-            borderRadius: "50%", border: "2px solid rgba(239,68,68,0.4)",
-            animation: `pulse ${1 + i * 0.3}s ease-out infinite`,
-            animationDelay: `${i * 0.2}s`,
+            position: "absolute", inset: `-${(i + 1) * 18}px`,
+            borderRadius: "50%", border: "2px solid rgba(239,68,68,0.35)",
+            animation: `pulse ${1.2 + i * 0.35}s ease-out infinite`,
+            animationDelay: `${i * 0.25}s`,
           }} />
         ))}
-        <button onClick={startListening} disabled={status === "thinking"} style={{
-          width: "120px", height: "120px", borderRadius: "50%",
-          border: "none", background: btnColor, color: "white",
-          fontSize: status === "thinking" ? "28px" : "36px",
-          cursor: status === "thinking" ? "not-allowed" : "pointer",
-          boxShadow: `0 0 40px ${btnColor}66, 0 8px 32px rgba(0,0,0,0.4)`,
-          transition: "all 0.3s ease", display: "flex",
-          alignItems: "center", justifyContent: "center",
-          position: "relative", zIndex: 1,
-          transform: status === "listening" ? "scale(1.08)" : "scale(1)",
-        }}>
-          {btnIcon}
+        <button
+          onPointerDown={handleMicPress}
+          disabled={phase === "thinking"}
+          style={{
+            width: "140px", height: "140px", borderRadius: "50%",
+            border: "none", background: btnColor, color: "white",
+            fontSize: phase === "thinking" ? "32px" : "44px",
+            cursor: phase === "thinking" ? "not-allowed" : "pointer",
+            boxShadow: `0 0 50px ${btnColor}55, 0 10px 40px rgba(0,0,0,0.5)`,
+            transition: "all 0.25s ease",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            position: "relative", zIndex: 1,
+            transform: phase === "recording" ? "scale(1.1)" : "scale(1)",
+            WebkitTapHighlightColor: "transparent",
+            touchAction: "manipulation",
+          }}
+        >
+          {icons[phase]}
         </button>
       </div>
 
-      <div style={{ minHeight: "56px", textAlign: "center", marginBottom: "24px", maxWidth: "340px" }}>
+      {/* Instruction label */}
+      <div style={{ marginBottom: "8px" }}>
+        <span style={{
+          fontSize: "13px", color: "#4ade80", letterSpacing: "2px",
+          textTransform: "uppercase", opacity: phase === "idle" ? 1 : 0,
+          transition: "opacity 0.3s",
+        }}>
+          {phase === "idle" ? "TAP TO SPEAK" : " "}
+        </span>
+      </div>
+
+      {/* Status / transcript */}
+      <div style={{ minHeight: "64px", textAlign: "center", maxWidth: "320px", marginBottom: "24px" }}>
         {transcript && (
-          <div style={{ fontSize: "13px", color: "#86efac", marginBottom: "6px", fontStyle: "italic", opacity: 0.85 }}>
+          <div style={{ fontSize: "13px", color: "#86efac", marginBottom: "8px", fontStyle: "italic", opacity: 0.9 }}>
             "{transcript}"
           </div>
         )}
         {message && (
           <div style={{
-            fontSize: "15px", lineHeight: 1.4,
-            color: status === "error" ? "#fca5a5" : status === "success" ? "#86efac" : "#d1fae5",
+            fontSize: "15px", lineHeight: 1.5,
+            color: phase === "error" ? "#fca5a5" : phase === "success" ? "#86efac" : "#d1fae5",
           }}>
             {message}
           </div>
         )}
-        {!transcript && !message && status === "idle" && (
-          <div style={{ fontSize: "14px", color: "#6b7280", lineHeight: 1.6 }}>
-            Tap the mic and say<br />
-            <span style={{ color: "#4ade80", fontStyle: "italic" }}>"Add milk and eggs"</span><br />
+        {!message && !transcript && phase === "idle" && (
+          <div style={{ fontSize: "14px", color: "#4b5563", lineHeight: 1.7 }}>
+            Say <span style={{ color: "#4ade80", fontStyle: "italic" }}>"Add milk and eggs"</span><br />
             or <span style={{ color: "#4ade80", fontStyle: "italic" }}>"Read my list"</span>
           </div>
         )}
       </div>
 
+      {/* List */}
       {showList && listItems.length > 0 && (
         <div style={{
-          width: "100%", maxWidth: "360px",
+          width: "100%", maxWidth: "340px",
           background: "rgba(255,255,255,0.05)",
           border: "1px solid rgba(74,222,128,0.2)",
           borderRadius: "16px", padding: "20px",
-          backdropFilter: "blur(10px)",
         }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
             <span style={{ fontSize: "11px", letterSpacing: "3px", color: "#4ade80", textTransform: "uppercase" }}>Your List</span>
-            <button onClick={() => setShowList(false)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "20px" }}>×</button>
+            <button onClick={() => setShowList(false)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "22px", lineHeight: 1 }}>×</button>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            {listItems.map((item, i) => (
-              <div key={i} style={{
-                display: "flex", alignItems: "center", gap: "10px",
-                padding: "8px 0",
-                borderBottom: i < listItems.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none",
-              }}>
-                <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} />
-                <span style={{ color: "#e2e8f0", fontSize: "15px" }}>{item}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {status === "idle" && !showList && (
-        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", justifyContent: "center", marginTop: "16px" }}>
-          {["Add items", "Read my list"].map((hint) => (
-            <div key={hint} style={{
-              padding: "6px 14px", borderRadius: "20px",
-              border: "1px solid rgba(74,222,128,0.25)",
-              color: "#6b7280", fontSize: "12px", letterSpacing: "0.5px",
+          {listItems.map((item, i) => (
+            <div key={i} style={{
+              display: "flex", alignItems: "center", gap: "10px",
+              padding: "9px 0",
+              borderBottom: i < listItems.length - 1 ? "1px solid rgba(255,255,255,0.07)" : "none",
             }}>
-              {hint}
+              <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} />
+              <span style={{ color: "#e2e8f0", fontSize: "15px" }}>{item}</span>
             </div>
           ))}
         </div>
       )}
 
-      <div style={{ position: "absolute", bottom: "20px", display: "flex", alignItems: "center", gap: "6px", opacity: 0.5 }}>
+      <div style={{ position: "absolute", bottom: "20px", display: "flex", alignItems: "center", gap: "6px", opacity: 0.4 }}>
         <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#22c55e" }} />
         <span style={{ fontSize: "11px", color: "#6b7280", letterSpacing: "1px" }}>Connected to Google Sheets</span>
       </div>
 
       <style>{`
         @keyframes pulse {
-          0% { transform: scale(1); opacity: 0.6; }
-          100% { transform: scale(2); opacity: 0; }
+          0% { transform: scale(1); opacity: 0.5; }
+          100% { transform: scale(2.2); opacity: 0; }
         }
       `}</style>
     </div>
