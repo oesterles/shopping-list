@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxrL72FiBQU6Stc4rtObFgKkrnQZAju3RS4ki_p_gOntnAoRTX_2P4IghOzZEfslRZlow/exec";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxVgSYIOcGSIqULWSao4zga8oya1EjRq3Ljcb32Fr8g4IZnCdrTVkdO2U6VjdsZLBWhFQ/exec";
 
 export default function ShoppingListApp() {
   const [phase, setPhase] = useState("idle");
