@@ -1,9 +1,8 @@
 import { useState, useRef, useCallback } from "react";
 
-const SHEET_NAME = "Notes and list";
-const TAB_NAME = "List";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyiX6DVqhYT5qm4krjH4OpK7xqthe7PePCPgbMH-HARnXlbh9SsGCS0mGVhUGrep6CuUQ/exec";
 
-const SYSTEM_PROMPT = `You are a shopping list assistant. The user will speak commands to manage their Google Sheets shopping list.
+const SYSTEM_PROMPT = `You are a shopping list assistant. The user will speak commands to manage their shopping list.
 
 You must respond ONLY with a valid JSON object — no markdown, no explanation, no extra text.
 
@@ -21,11 +20,11 @@ Unknown:
 Rules:
 - Capitalize each item properly
 - Remove duplicates
-- Strip quantities from item names
+- Strip quantities from item names (just the item name)
 - If the user says "add X and Y" or "I need X, Y, Z" extract all items`;
 
 export default function ShoppingListApp() {
-  const [phase, setPhase] = useState("idle"); // idle | recording | thinking | success | error
+  const [phase, setPhase] = useState("idle");
   const [transcript, setTranscript] = useState("");
   const [message, setMessage] = useState("");
   const [listItems, setListItems] = useState([]);
@@ -54,22 +53,18 @@ export default function ShoppingListApp() {
     return JSON.parse(raw.replace(/```json|```/g, "").trim());
   };
 
-  const callClaudeWithDrive = async (userContent) => {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const callSheet = async (payload) => {
+    const res = await fetch(SCRIPT_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        system: `You manage a Google Sheet called "${SHEET_NAME}", tab "${TAB_NAME}", column A. Use the Google Drive MCP tools to complete the task. Be efficient.`,
-        messages: [{ role: "user", content: userContent }],
-        mcp_servers: [{
-          type: "url",
-          url: "https://drivemcp.googleapis.com/mcp/v1",
-          name: "google-drive-mcp",
-        }],
-      }),
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify(payload),
     });
+    return { success: true };
+  };
+
+  const readSheet = async () => {
+    const res = await fetch(SCRIPT_URL + "?action=read");
     return res.json();
   };
 
@@ -90,9 +85,7 @@ export default function ShoppingListApp() {
           return;
         }
         setMessage(`Adding ${items.join(", ")}...`);
-        await callClaudeWithDrive(
-          `Append these items to column A of the "${TAB_NAME}" tab in "${SHEET_NAME}", after any existing data: ${items.join(", ")}`
-        );
+        await callSheet({ action: "add", items });
         setPhase("success");
         setMessage(`✓ Added: ${items.join(", ")}`);
         speak(`Added ${items.join(" and ")} to your list.`);
@@ -100,20 +93,14 @@ export default function ShoppingListApp() {
 
       } else if (intent.action === "read") {
         setMessage("Reading your list...");
-        const resp = await callClaudeWithDrive(
-          `Read all non-empty values from column A of the "${TAB_NAME}" tab in "${SHEET_NAME}". List them plainly.`
-        );
-        const textBlock = resp.content?.find((b) => b.type === "text");
-        const lines = (textBlock?.text || "")
-          .split("\n")
-          .map((l) => l.replace(/^[-•*\d.)\s]+/, "").trim())
-          .filter((l) => l.length > 1 && !/column|sheet|tab/i.test(l));
-        setListItems(lines);
+        const result = await readSheet();
+        const items = result.items || [];
+        setListItems(items);
         setShowList(true);
         setPhase("success");
-        setMessage(`${lines.length} item(s) on your list`);
-        speak(lines.length
-          ? `You have ${lines.length} items: ${lines.slice(0, 5).join(", ")}${lines.length > 5 ? ", and more" : ""}.`
+        setMessage(`${items.length} item(s) on your list`);
+        speak(items.length
+          ? `You have ${items.length} items: ${items.slice(0, 5).join(", ")}${items.length > 5 ? ", and more" : ""}.`
           : "Your list is empty.");
         setTimeout(() => { setPhase("idle"); setTranscript(""); }, 2000);
 
@@ -133,7 +120,6 @@ export default function ShoppingListApp() {
   const handleMicPress = useCallback(() => {
     if (phase === "thinking") return;
 
-    // Stop if already recording
     if (phase === "recording") {
       recognitionRef.current?.stop();
       setPhase("idle");
@@ -160,9 +146,7 @@ export default function ShoppingListApp() {
       setTranscript("");
     };
 
-    r.onspeechend = () => {
-      r.stop();
-    };
+    r.onspeechend = () => r.stop();
 
     r.onresult = (e) => {
       const text = e.results[0][0].transcript;
@@ -196,13 +180,8 @@ export default function ShoppingListApp() {
     }
   }, [phase, processText]);
 
-  const colors = {
-    idle: "#16a34a", recording: "#ef4444",
-    thinking: "#f59e0b", success: "#22c55e", error: "#dc2626"
-  };
-  const icons = {
-    idle: "🎙", recording: "⏹", thinking: "⋯", success: "✓", error: "!"
-  };
+  const colors = { idle: "#16a34a", recording: "#ef4444", thinking: "#f59e0b", success: "#22c55e", error: "#dc2626" };
+  const icons = { idle: "🎙", recording: "⏹", thinking: "⋯", success: "✓", error: "!" };
   const btnColor = colors[phase];
 
   return (
@@ -220,7 +199,6 @@ export default function ShoppingListApp() {
         pointerEvents: "none",
       }} />
 
-      {/* Header */}
       <div style={{ textAlign: "center", marginBottom: "48px" }}>
         <div style={{ fontSize: "11px", letterSpacing: "4px", color: "#4ade80", textTransform: "uppercase", marginBottom: "8px", opacity: 0.8 }}>
           Voice Assistant
@@ -231,7 +209,6 @@ export default function ShoppingListApp() {
         <div style={{ width: "40px", height: "2px", background: "#22c55e", margin: "12px auto 0", borderRadius: "2px" }} />
       </div>
 
-      {/* Big tap button */}
       <div style={{ position: "relative", marginBottom: "40px" }}>
         {phase === "recording" && [0, 1, 2].map((i) => (
           <div key={i} style={{
@@ -262,18 +239,12 @@ export default function ShoppingListApp() {
         </button>
       </div>
 
-      {/* Instruction label */}
       <div style={{ marginBottom: "8px" }}>
-        <span style={{
-          fontSize: "13px", color: "#4ade80", letterSpacing: "2px",
-          textTransform: "uppercase", opacity: phase === "idle" ? 1 : 0,
-          transition: "opacity 0.3s",
-        }}>
-          {phase === "idle" ? "TAP TO SPEAK" : " "}
+        <span style={{ fontSize: "13px", color: "#4ade80", letterSpacing: "2px", textTransform: "uppercase", opacity: phase === "idle" ? 1 : 0, transition: "opacity 0.3s" }}>
+          TAP TO SPEAK
         </span>
       </div>
 
-      {/* Status / transcript */}
       <div style={{ minHeight: "64px", textAlign: "center", maxWidth: "320px", marginBottom: "24px" }}>
         {transcript && (
           <div style={{ fontSize: "13px", color: "#86efac", marginBottom: "8px", fontStyle: "italic", opacity: 0.9 }}>
@@ -281,10 +252,7 @@ export default function ShoppingListApp() {
           </div>
         )}
         {message && (
-          <div style={{
-            fontSize: "15px", lineHeight: 1.5,
-            color: phase === "error" ? "#fca5a5" : phase === "success" ? "#86efac" : "#d1fae5",
-          }}>
+          <div style={{ fontSize: "15px", lineHeight: 1.5, color: phase === "error" ? "#fca5a5" : phase === "success" ? "#86efac" : "#d1fae5" }}>
             {message}
           </div>
         )}
@@ -296,24 +264,14 @@ export default function ShoppingListApp() {
         )}
       </div>
 
-      {/* List */}
       {showList && listItems.length > 0 && (
-        <div style={{
-          width: "100%", maxWidth: "340px",
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(74,222,128,0.2)",
-          borderRadius: "16px", padding: "20px",
-        }}>
+        <div style={{ width: "100%", maxWidth: "340px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(74,222,128,0.2)", borderRadius: "16px", padding: "20px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
             <span style={{ fontSize: "11px", letterSpacing: "3px", color: "#4ade80", textTransform: "uppercase" }}>Your List</span>
             <button onClick={() => setShowList(false)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "22px", lineHeight: 1 }}>×</button>
           </div>
           {listItems.map((item, i) => (
-            <div key={i} style={{
-              display: "flex", alignItems: "center", gap: "10px",
-              padding: "9px 0",
-              borderBottom: i < listItems.length - 1 ? "1px solid rgba(255,255,255,0.07)" : "none",
-            }}>
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "9px 0", borderBottom: i < listItems.length - 1 ? "1px solid rgba(255,255,255,0.07)" : "none" }}>
               <div style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} />
               <span style={{ color: "#e2e8f0", fontSize: "15px" }}>{item}</span>
             </div>
